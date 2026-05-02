@@ -2,6 +2,7 @@
 ARG BASE_VERSION
 ARG BASE_HASH
 FROM alpine:${BASE_VERSION}@sha256:${BASE_HASH} AS builder
+ARG TARGETARCH
 ARG OPENSSL_VERSION
 ARG APP_VERSION
 
@@ -19,7 +20,7 @@ RUN set -eu \
         build-base=0.5-r3 \
         ca-certificates=20260413-r0 \
         linux-headers=6.16.12-r0 \
-        tzdata=2026a-r0 \
+        tzdata=2026b-r0 \
         upx=5.0.2-r0 \
         perl=5.42.2-r0 \
         cmake=4.1.3-r0 \
@@ -60,10 +61,15 @@ RUN git config --global advice.detachedHead false \
 # Build zlib-ng and Brotli compression libraries with optimizations
 WORKDIR /tmp/zlib-ng
 RUN mkdir -p /tmp/ngx_brotli/deps/brotli/out \
+    && case "${TARGETARCH}" in \
+        amd64) ARCH_FLAGS="-m64 -march=x86-64 -mtune=generic" ;; \
+        arm64) ARCH_FLAGS="-march=armv8-a" ;; \
+        *) ARCH_FLAGS="" ;; \
+    esac \
     # Configure Brotli with performance optimizations
     && cmake -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
-        -DCMAKE_C_FLAGS="-m64 -march=x86-64 -mtune=generic -flto -funroll-loops -ffunction-sections -fdata-sections -Wl,--gc-sections" \
-        -DCMAKE_CXX_FLAGS="-m64 -march=x86-64 -mtune=generic -flto -funroll-loops -ffunction-sections -fdata-sections -Wl,--gc-sections" \
+        -DCMAKE_C_FLAGS="${ARCH_FLAGS} -flto -funroll-loops -ffunction-sections -fdata-sections -Wl,--gc-sections" \
+        -DCMAKE_CXX_FLAGS="${ARCH_FLAGS} -flto -funroll-loops -ffunction-sections -fdata-sections -Wl,--gc-sections" \
         -DCMAKE_INSTALL_PREFIX=./installed -B /tmp/ngx_brotli/deps/brotli/out -S /tmp/ngx_brotli/deps/brotli \
     # Build Brotli encoder
     && cmake --build /tmp/ngx_brotli/deps/brotli/out --config Release --target brotlienc \
@@ -74,7 +80,12 @@ RUN mkdir -p /tmp/ngx_brotli/deps/brotli/out \
 
 # Configure and build NGINX with security hardening and optimizations
 WORKDIR /tmp/nginx
-RUN ./auto/configure \
+RUN case "${TARGETARCH}" in \
+        amd64) OPENSSL_ARCH_OPT="enable-ec_nistp_64_gcc_128"; CC_ARCH_OPT="-march=x86-64" ;; \
+        arm64) OPENSSL_ARCH_OPT=""; CC_ARCH_OPT="-march=armv8-a" ;; \
+        *) OPENSSL_ARCH_OPT=""; CC_ARCH_OPT="" ;; \
+    esac \
+    && ./auto/configure \
         --with-debug \
         # Installation paths
         --prefix="/etc/nginx" \
@@ -92,7 +103,7 @@ RUN ./auto/configure \
         # SSL/TLS configuration with modern protocols
         --with-openssl="/tmp/openssl" \
         --with-openssl-opt="\
-            enable-ec_nistp_64_gcc_128 \
+            ${OPENSSL_ARCH_OPT} \
             no-tls1 \
             no-tls1_1 \
             no-shared \
@@ -108,7 +119,7 @@ RUN ./auto/configure \
             -static \
             -static-libgcc \
             -O2 \
-            -march=x86-64 \
+            ${CC_ARCH_OPT} \
             -flto \
             -fhardened \
             -Wformat \

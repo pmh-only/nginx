@@ -1,314 +1,144 @@
-name: CI/CD📦
+name: Build multi-arch image
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
 
 permissions:
   contents: read
-  security-events: write
-  id-token: write
+  packages: write
 
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
-  DOCKER_BUILDKIT: 1
-  BUILDKIT_PROGRESS: quiet
-  # BUILDKIT_PROGRESS: plain
 
 jobs:
-  build:
-    if: github.actor == 'ammnt'
+  metadata:
     runs-on: ubuntu-24.04
-    permissions:
-      contents: read
-      packages: write
-      id-token: write
-      attestations: write
     outputs:
-      digest: ${{ steps.digest.outputs.digest }}
-      app_version: ${{ steps.load_env.outputs.APP_VERSION }}
-      base_version: ${{ steps.load_env.outputs.BASE_VERSION }}
-      base_hash: ${{ steps.load_env.outputs.BASE_HASH }}
-      openssl_version: ${{ steps.load_env.outputs.OPENSSL_VERSION }}
-      build_date: ${{ steps.load_env.outputs.BUILD_DATE }}
-      vcs_ref: ${{ steps.load_env.outputs.VCS_REF }}
-
+      app_version: ${{ steps.env.outputs.APP_VERSION }}
+      base_version: ${{ steps.env.outputs.BASE_VERSION }}
+      base_hash: ${{ steps.env.outputs.BASE_HASH }}
+      openssl_version: ${{ steps.env.outputs.OPENSSL_VERSION }}
+      build_date: ${{ steps.env.outputs.BUILD_DATE }}
+      vcs_ref: ${{ steps.env.outputs.VCS_REF }}
     steps:
-      - name: Checkout repository📥
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - name: Load .env variables☁️
-        id: load_env
+      - name: Load build metadata
+        id: env
+        shell: bash
         run: |
-          while IFS= read -r line; do
-            if [[ ! "$line" =~ ^# ]] && [[ -n "$line" ]]; then
-              key="${line%%=*}"
-              value="${line#*=}"
-              echo "$key=$value" >> $GITHUB_OUTPUT
+          while IFS='=' read -r key value; do
+            if [[ -n "$key" && ! "$key" =~ ^# ]]; then
+              echo "$key=$value" >> "$GITHUB_OUTPUT"
             fi
           done < .env
 
-          fetch_ver() {
-            curl -sSfL "https://api.github.com/repos/$1/releases/latest" | \
-            grep '"tag_name":' | \
-            sed -E 's/.*"v?([0-9][^"]+)".*/\1/'
-          }
+          echo "BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
+          echo "VCS_REF=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
 
-          for pair in "COSIGN_VERSION:sigstore/cosign" "BUILDX_VERSION:docker/buildx" \
-                      "BUILDKIT_VERSION:moby/buildkit" "MINT_VERSION:mintoolkit/mint" \
-                      "DIVE_VERSION:wagoodman/dive" "GRYPE_VERSION:anchore/grype" \
-                      "SYFT_VERSION:anchore/syft" "TRIVY_VERSION:aquasecurity/trivy"; do
-            IFS=':' read -r var repo <<< "$pair"
-            ver=$(fetch_ver "$repo")
-            echo "$var=$ver" >> $GITHUB_OUTPUT
-            echo "$var=$ver" >> $GITHUB_ENV
-          done
+  build:
+    needs: metadata
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            arch: amd64
+            runner: ubuntu-24.04
+          - platform: linux/arm64
+            arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-          echo "BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%S')" >> $GITHUB_OUTPUT
-          echo "VCS_REF=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
-          printenv | sort -n
-
-      - name: Login to GHCR🔑
-        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121
+      - name: Login to GHCR
+        uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
-          password: ${{ secrets.GH_TOKEN }}
+          password: ${{ github.token }}
 
-      - name: Setup Docker Buildx🏗️
-        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd
-        with:
-          version: v${{ env.BUILDX_VERSION }}
-          driver-opts: image=moby/buildkit:v${{ env.BUILDKIT_VERSION }}-rootless
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-      - name: Build Docker image🐳
+      - name: Build and push ${{ matrix.platform }} digest
         id: build
-        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f
-        env:
-          DOCKER_BUILD_RECORD_UPLOAD: false
-          DOCKER_BUILD_CHECKS_ANNOTATIONS: false
-          DOCKER_CONTENT_TRUST: 1
+        uses: docker/build-push-action@v6
         with:
-          provenance: false
           context: .
           file: ./Dockerfile.template
-          platforms: linux/amd64
-          load: true
-          tags: ghcr.io/ammnt/nginx:${{ steps.load_env.outputs.APP_VERSION }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          platforms: ${{ matrix.platform }}
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
           build-args: |
-            BASE_VERSION=${{ steps.load_env.outputs.BASE_VERSION }}
-            BASE_HASH=${{ steps.load_env.outputs.BASE_HASH }}
-            OPENSSL_VERSION=${{ steps.load_env.outputs.OPENSSL_VERSION }}
-            APP_VERSION=${{ steps.load_env.outputs.APP_VERSION }}
-            VCS_REF=${{ steps.load_env.outputs.VCS_REF }}
-            BUILD_DATE=${{ steps.load_env.outputs.BUILD_DATE }}
+            BASE_VERSION=${{ needs.metadata.outputs.base_version }}
+            BASE_HASH=${{ needs.metadata.outputs.base_hash }}
+            OPENSSL_VERSION=${{ needs.metadata.outputs.openssl_version }}
+            APP_VERSION=${{ needs.metadata.outputs.app_version }}
+            VCS_REF=${{ needs.metadata.outputs.vcs_ref }}
+            BUILD_DATE=${{ needs.metadata.outputs.build_date }}
 
-      - name: Slim and push image with Mint🔧
+      - name: Export digest
+        shell: bash
         run: |
-          curl -sSL -o ds.tar.gz https://github.com/mintoolkit/mint/releases/download/${{ env.MINT_VERSION }}/dist_linux.tar.gz
-          tar -xf ds.tar.gz
-          ./dist_linux/mint --quiet build \
-            --target ghcr.io/ammnt/nginx:${{ steps.load_env.outputs.APP_VERSION }} \
-            --tag ghcr.io/ammnt/nginx:${{ steps.load_env.outputs.APP_VERSION }} \
-            --tag ghcr.io/ammnt/nginx:latest \
-            --http-probe=false --continue-after=5 \
-            --include-path=/etc/shadow --include-path=/etc/group
-          docker push ghcr.io/ammnt/nginx --all-tags
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
 
-      - name: Explore with Dive🔍
-        env:
-          CI: true
-        run: |
-          docker pull ghcr.io/ammnt/nginx:${{ needs.build.outputs.app_version }}
-          wget -q https://github.com/wagoodman/dive/releases/download/v${{ env.DIVE_VERSION }}/dive_${{ env.DIVE_VERSION }}_linux_amd64.tar.gz
-          tar xzf dive_${{ env.DIVE_VERSION }}_linux_amd64.tar.gz -C /usr/local/bin
-          dive --config ./dive-ci.yml -j dive.report.json ghcr.io/ammnt/nginx:${{ needs.build.outputs.app_version }}
-
-      - name: Upload Mint report📁
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
         with:
-          name: mint-report
-          path: slim.report.json
+          name: digest-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
 
-      - name: Upload Dive report📁
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: dive-report
-          path: dive.report.json
-
-      - name: Get image digest🔢
-        id: digest
-        run: |
-          DIGEST=$(docker inspect -f='{{index .RepoDigests 0}}' ghcr.io/ammnt/nginx:${{ steps.load_env.outputs.APP_VERSION }} | cut -d'@' -f2)
-          echo "digest=$DIGEST" >> $GITHUB_OUTPUT
-
-  security-scans:
-    needs: build
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: read
-      security-events: write
-      packages: write
-      id-token: write
-    strategy:
-      matrix:
-        scanner: [ hadolint, dockle, scout, trivy, grype, snyk, syft ]
-      fail-fast: false
-    steps:
-      - name: Checkout repository📥
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
-
-      - name: Login to Docker Hub🔑
-        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Lint Dockerfile with Hadolint🔍
-        if: matrix.scanner == 'hadolint'
-        uses: hadolint/hadolint-action@2332a7b74a6de0dda2e2221d575162eba76ba5e5
-        with:
-          dockerfile: Dockerfile.template
-          format: sarif
-          output-file: hadolint.sarif
-          config: ./hadolint.yaml
-
-      - name: Dockle scan🛡️
-        if: matrix.scanner == 'dockle'
-        uses: goodwithtech/dockle-action@e30e6af832aad6ea7dca2a248d31a85eab6dbd68
-        with:
-          image: ghcr.io/ammnt/nginx:${{ needs.build.outputs.app_version }}
-          exit-code: "1"
-          exit-level: "warn"
-          ignore: "CIS-DI-0010"
-
-      - name: Docker Scout scan🛡️
-        if: matrix.scanner == 'scout'
-        uses: docker/scout-action@bacf462e8d090c09660de30a6ccc718035f961e3
-        with:
-          command: cves,sbom
-          image: ghcr.io/ammnt/nginx:${{ needs.build.outputs.app_version }}
-          sarif-file: scout.sarif
-          write-comment: true
-          summary: false
-          exit-code: true
-          github-token: ${{ secrets.GH_TOKEN }}
-
-      - name: Trivy scan🛡️
-        if: matrix.scanner == 'trivy'
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
-        with:
-          image-ref: ghcr.io/ammnt/nginx:${{ needs.build.outputs.app_version }}
-          scan-type: image
-          format: sarif
-          output: trivy.sarif
-          severity: "MEDIUM,HIGH,CRITICAL"
-          scanners: "vuln,secret"
-          exit-code: "1"
-          github-pat: ${{ secrets.GH_TOKEN }}
-          version: v${{ env.TRIVY_VERSION }}
-          trivy-config: trivy.yaml
-
-      - name: Grype scan🛡️
-        if: matrix.scanner == 'grype'
-        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2
-        with:
-          image: ghcr.io/ammnt/nginx:${{ needs.build.outputs.app_version }}
-          fail-build: false
-          severity-cutoff: critical
-          output-format: sarif
-          grype-version: v${{ env.GRYPE_VERSION }}
-          output-file: grype.sarif
-
-      - name: Snyk scan🛡️
-        if: matrix.scanner == 'snyk'
-        continue-on-error: true
-        uses: snyk/actions/docker@9adf32b1121593767fc3c057af55b55db032dc04
-        env:
-          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-        with:
-          image: ghcr.io/ammnt/nginx:${{ needs.build.outputs.app_version }}
-          sarif: true
-          args: --file=Dockerfile.template --sarif-file-output=snyk.sarif
-
-      - name: Generate SBOM with Syft📋
-        if: matrix.scanner == 'syft'
-        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610
-        with:
-          syft-version: v${{ env.SYFT_VERSION }}
-          image: ghcr.io/ammnt/nginx:${{ needs.build.outputs.app_version }}
-          format: cyclonedx-json
-          upload-artifact: true
-          dependency-snapshot: true
-          github-token: ${{ secrets.GH_TOKEN }}
-
-      - name: Upload ${{ matrix.scanner }} report📁
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: ${{ matrix.scanner }}-report
-          path: |
-            *.sarif
-
-      - name: Upload SARIF to Code Scanning🔬
-        if: hashFiles('*.sarif') != ''
-        uses: github/codeql-action/upload-sarif@0c0c5dc2f136b98cb0537075ccfa21f94cd9a63e
-        with:
-          sarif_file: .
-          category: ${{ matrix.scanner }}
-
-  finalize:
-    needs: [ build, security-scans ]
+  merge:
+    needs:
+      - metadata
+      - build
     runs-on: ubuntu-24.04
     permissions:
       contents: read
       packages: write
-      id-token: write
-      attestations: write
     steps:
-      - name: Install Cosign🔐
-        uses: sigstore/cosign-installer@cad07c2e89fa2edd6e2d7bab4c1aa38e53f76003
+      - name: Download digests
+        uses: actions/download-artifact@v4
         with:
-          cosign-release: v${{ env.COSIGN_VERSION }}
+          path: /tmp/digests
+          pattern: digest-*
+          merge-multiple: true
 
-      - name: Login to GHCR🔑
-        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121
+      - name: Login to GHCR
+        uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
-          password: ${{ secrets.GH_TOKEN }}
+          password: ${{ github.token }}
 
-      - name: Login to Docker Hub🔑
-        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-      - name: Push images to Docker Hub🚚
+      - name: Create multi-arch manifest
+        shell: bash
+        working-directory: /tmp/digests
         run: |
-          docker pull ghcr.io/ammnt/nginx:${{ needs.build.outputs.app_version }}
-          docker tag ghcr.io/ammnt/nginx:${{ needs.build.outputs.app_version }} ammnt/nginx:${{ needs.build.outputs.app_version }}
-          docker tag ghcr.io/ammnt/nginx:${{ needs.build.outputs.app_version }} ammnt/nginx:latest
-          docker push ammnt/nginx --all-tags
+          image="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
+          docker buildx imagetools create \
+            --tag "${image}:${{ needs.metadata.outputs.app_version }}" \
+            --tag "${image}:latest" \
+            $(printf "${image}@sha256:%s " *)
 
-      - name: Attest image provenance📜
-        # continue-on-error: true
-        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32
-        with:
-          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          subject-digest: ${{ needs.build.outputs.digest }}
-          push-to-registry: true
-          show-summary: false
-          github-token: ${{ secrets.GH_TOKEN }}
-
-      - name: Sign container images✍️
-        # continue-on-error: true
-        env:
-          COSIGN_EXPERIMENTAL: "true"
-          COSIGN_KEY: ${{ secrets.COSIGN_KEY }}
-          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
-        run: |
-          cosign sign -y --key env://COSIGN_KEY ghcr.io/ammnt/nginx@${{ needs.build.outputs.digest }}
-          cosign sign -y --key env://COSIGN_KEY ammnt/nginx@${{ needs.build.outputs.digest }}
-          docker system prune -f ; rm -rf ${{ github.workspace }}/*
+      - name: Inspect image
+        run: docker buildx imagetools inspect "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.metadata.outputs.app_version }}"

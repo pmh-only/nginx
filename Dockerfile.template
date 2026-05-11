@@ -48,6 +48,8 @@ RUN git config --global advice.detachedHead false \
     && git clone -q --depth 1 --recursive -j8 --single-branch -b "${ZLIB_VERSION}" https://github.com/zlib-ng/zlib-ng \
     # Clone Brotli compression module
     && git clone -q --depth 1 --recurse-submodules -j8 https://github.com/google/ngx_brotli \
+    # Clone headers-more module for response header clearing
+    && git clone -q --depth 1 --recurse-submodules -j8 https://github.com/openresty/headers-more-nginx-module \
     # Clone ZSTD compression module
     && git clone -q --depth 1 --recursive -j8 --single-branch -b "${ZSTD_VERSION}" https://github.com/tokers/zstd-nginx-module \
     # Remove Server header from HTTP responses (HTTP/1.1, HTTP/2, HTTP/3)
@@ -142,6 +144,7 @@ RUN case "${TARGETARCH}" in \
         --with-http_ssl_module \
         --with-http_v2_module \
         --with-http_v3_module \
+        --with-http_sub_module \
         --with-http_gzip_static_module \
         # Stream modules
         --with-stream \
@@ -168,6 +171,7 @@ RUN case "${TARGETARCH}" in \
         --without-mail_smtp_module \
         # Third-party modules
         --add-module="/tmp/ngx_brotli" \
+        --add-module="/tmp/headers-more-nginx-module" \
         --add-module="/tmp/zstd-nginx-module" \
     # Build and install NGINX
     && make -s -j "$(nproc)" && make -s install && make -s clean \

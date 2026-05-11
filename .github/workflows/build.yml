@@ -70,6 +70,8 @@ jobs:
 
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@v3
+        with:
+          cache-binary: true
 
       - name: Build and push ${{ matrix.platform }} digest
         id: build
@@ -79,8 +81,13 @@ jobs:
           file: ./Dockerfile.template
           platforms: ${{ matrix.platform }}
           outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
-          cache-from: type=gha,scope=${{ matrix.arch }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
+          github-token: ${{ github.token }}
+          cache-from: |
+            type=gha,scope=${{ github.repository_id }}-${{ matrix.arch }}
+            type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache-${{ matrix.arch }}
+          cache-to: |
+            type=gha,mode=max,scope=${{ github.repository_id }}-${{ matrix.arch }},timeout=30m
+            type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache-${{ matrix.arch }},mode=max,image-manifest=true,oci-mediatypes=true,ignore-error=true
           build-args: |
             BASE_VERSION=${{ needs.metadata.outputs.base_version }}
             BASE_HASH=${{ needs.metadata.outputs.base_hash }}

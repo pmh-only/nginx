@@ -1,3 +1,5 @@
+# syntax=docker/dockerfile:1.7
+
 # Build arguments for version pinning and reproducibility
 ARG BASE_VERSION
 ARG BASE_HASH
@@ -5,6 +7,11 @@ FROM alpine:${BASE_VERSION}@sha256:${BASE_HASH} AS builder
 ARG TARGETARCH
 ARG OPENSSL_VERSION
 ARG APP_VERSION
+
+ENV CCACHE_DIR=/root/.cache/ccache \
+    CCACHE_BASEDIR=/tmp \
+    CCACHE_COMPILERCHECK=content \
+    CCACHE_MAXSIZE=2G
 
 WORKDIR /tmp
 # System setup and dependency installation
@@ -19,6 +26,7 @@ RUN set -eu \
         mimalloc2-dev=2.2.3-r2 \
         build-base=0.5-r3 \
         ca-certificates=20260413-r0 \
+        ccache=4.12.1-r0 \
         linux-headers=6.16.12-r0 \
         tzdata=2026b-r0 \
         upx=5.0.2-r0 \
@@ -62,7 +70,9 @@ RUN git config --global advice.detachedHead false \
 
 # Build zlib-ng and Brotli compression libraries with optimizations
 WORKDIR /tmp/zlib-ng
-RUN mkdir -p /tmp/ngx_brotli/deps/brotli/out \
+RUN --mount=type=cache,target=/root/.cache/ccache,sharing=locked \
+    --mount=type=cache,target=/tmp/ngx_brotli/deps/brotli/out,sharing=locked \
+    mkdir -p /tmp/ngx_brotli/deps/brotli/out \
     && case "${TARGETARCH}" in \
         amd64) ARCH_FLAGS="-m64 -march=x86-64 -mtune=generic" ;; \
         arm64) ARCH_FLAGS="-march=armv8-a" ;; \
@@ -70,19 +80,23 @@ RUN mkdir -p /tmp/ngx_brotli/deps/brotli/out \
     esac \
     # Configure Brotli with performance optimizations
     && cmake -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
+        -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+        -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
         -DCMAKE_C_FLAGS="${ARCH_FLAGS} -flto -funroll-loops -ffunction-sections -fdata-sections -Wl,--gc-sections" \
         -DCMAKE_CXX_FLAGS="${ARCH_FLAGS} -flto -funroll-loops -ffunction-sections -fdata-sections -Wl,--gc-sections" \
         -DCMAKE_INSTALL_PREFIX=./installed -B /tmp/ngx_brotli/deps/brotli/out -S /tmp/ngx_brotli/deps/brotli \
     # Build Brotli encoder
     && cmake --build /tmp/ngx_brotli/deps/brotli/out --config Release --target brotlienc \
     # Configure zlib-ng for compatibility mode
-    && sed -i "s/compat=0/compat=1/" /tmp/zlib-ng/configure && ./configure --zlib-compat \
+    && sed -i "s/compat=0/compat=1/" /tmp/zlib-ng/configure && CC="ccache gcc" ./configure --zlib-compat \
     # Build and install zlib-ng
     && make -s -j "$(nproc)" && make -s install && make -s clean
 
 # Configure and build NGINX with security hardening and optimizations
 WORKDIR /tmp/nginx
-RUN case "${TARGETARCH}" in \
+RUN --mount=type=cache,target=/root/.cache/ccache,sharing=locked \
+    export CC="ccache gcc" CXX="ccache g++" \
+    && case "${TARGETARCH}" in \
         amd64) OPENSSL_ARCH_OPT="enable-ec_nistp_64_gcc_128"; CC_ARCH_OPT="-march=x86-64" ;; \
         arm64) OPENSSL_ARCH_OPT=""; CC_ARCH_OPT="-march=armv8-a" ;; \
         *) OPENSSL_ARCH_OPT=""; CC_ARCH_OPT="" ;; \
@@ -116,6 +130,7 @@ RUN case "${TARGETARCH}" in \
         # External libraries
         --with-pcre="/tmp/pcre2" \
         --with-zlib="/tmp/zlib-ng" \
+        --with-cc="$CC" \
         # Compilation flags
         --with-cc-opt="\
             -static \

@@ -192,8 +192,8 @@ RUN --mount=type=cache,target=/root/.cache/ccache,sharing=locked \
     # Both modules insert themselves after gzip via the same sed pattern; brotli runs first
     # (so zstd lands between gzip and brotli). Swapping here puts zstd after brotli → LIFO
     # means zstd runs first and wins when Accept-Encoding contains both br and zstd.
-    && sed -i \
-        "s/ngx_http_zstd_filter_module ngx_http_brotli_filter_module/ngx_http_brotli_filter_module ngx_http_zstd_filter_module/" \
+    && perl -0777 -i -pe \
+        's/&ngx_http_zstd_filter_module,(\n\s+)&ngx_http_brotli_filter_module,/&ngx_http_brotli_filter_module,$1&ngx_http_zstd_filter_module,/g' \
         objs/ngx_modules.c \
     # Build and install NGINX
     && make -s -j "$(nproc)" && make -s install && make -s clean \

@@ -20,24 +20,26 @@ RUN set -eu \
     && addgroup --system --gid "10001" nginx && adduser --disabled-password --shell /bin/false --ingroup nginx --uid "10001" --no-create-home nginx \
     # Update system and install build dependencies
     && apk -U -q upgrade && apk add -q --no-cache \
-        gcc=15.2.0-r2 \
-        make=4.4.1-r3 \
-        git=2.52.0-r0 \
-        mimalloc2-dev=2.2.3-r2 \
-        build-base=0.5-r3 \
-        ca-certificates=20260413-r0 \
-        ccache=4.12.1-r0 \
-        linux-headers=6.16.12-r0 \
-        tzdata=2026b-r0 \
-        upx=5.0.2-r0 \
+        clang22=22.1.3-r2 \
+        lld22=22.1.3-r0 \
+        llvm=22-r0 \
+        make=4.4.1-r4 \
+        git=2.54.0-r0 \
+        mimalloc2-dev=2.2.7-r0 \
+        build-base=0.5-r4 \
+        ca-certificates=20260611-r0 \
+        ccache=4.13.6-r0 \
+        linux-headers=7.0.0-r1 \
+        tzdata=2026c-r0 \
+        upx=5.2.0-r0 \
         perl=5.42.2-r0 \
-        cmake=4.1.3-r0 \
+        cmake=4.2.3-r0 \
         zstd-dev=1.5.7-r2 \
         zstd-static=1.5.7-r2 \
-        brotli-dev=1.2.0-r0  \
-        brotli-static=1.2.0-r0 \
-        curl=8.19.0-r0 \
-        bash=5.3.3-r1 \
+        brotli-dev=1.2.0-r1  \
+        brotli-static=1.2.0-r1 \
+        curl=8.21.0-r0 \
+        bash=5.3.9-r1 \
     # Update CA certificates for SSL verification
     && update-ca-certificates
 
@@ -71,7 +73,6 @@ RUN git config --global advice.detachedHead false \
 # Build zlib-ng and Brotli compression libraries with optimizations
 WORKDIR /tmp/zlib-ng
 RUN --mount=type=cache,target=/root/.cache/ccache,sharing=locked \
-    --mount=type=cache,target=/tmp/ngx_brotli/deps/brotli/out,sharing=locked \
     mkdir -p /tmp/ngx_brotli/deps/brotli/out \
     && case "${TARGETARCH}" in \
         amd64) ARCH_FLAGS="-m64 -march=x86-64 -mtune=generic" ;; \
@@ -80,6 +81,8 @@ RUN --mount=type=cache,target=/root/.cache/ccache,sharing=locked \
     esac \
     # Configure Brotli with performance optimizations
     && cmake -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
+        -DCMAKE_C_COMPILER=clang \
+        -DCMAKE_CXX_COMPILER=clang++ \
         -DCMAKE_C_COMPILER_LAUNCHER=ccache \
         -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
         -DCMAKE_C_FLAGS="${ARCH_FLAGS} -flto -funroll-loops -ffunction-sections -fdata-sections -Wl,--gc-sections" \
@@ -88,18 +91,19 @@ RUN --mount=type=cache,target=/root/.cache/ccache,sharing=locked \
     # Build Brotli encoder
     && cmake --build /tmp/ngx_brotli/deps/brotli/out --config Release --target brotlienc \
     # Configure zlib-ng for compatibility mode
-    && sed -i "s/compat=0/compat=1/" /tmp/zlib-ng/configure && CC="ccache gcc" ./configure --zlib-compat \
+    && sed -i "s/compat=0/compat=1/" /tmp/zlib-ng/configure && CC="ccache clang" ./configure --zlib-compat \
     # Build and install zlib-ng
     && make -s -j "$(nproc)" && make -s install && make -s clean
 
 # Configure and build NGINX with security hardening and optimizations
 WORKDIR /tmp/nginx
 RUN --mount=type=cache,target=/root/.cache/ccache,sharing=locked \
-    export CC="ccache gcc" CXX="ccache g++" \
+    export CC="ccache clang" CXX="ccache clang++" LD="lld" AR="llvm-ar" \
+        NM="llvm-nm" RANLIB="llvm-ranlib" STRIP="llvm-strip" \
     && case "${TARGETARCH}" in \
-        amd64) OPENSSL_ARCH_OPT="enable-ec_nistp_64_gcc_128"; CC_ARCH_OPT="-march=x86-64" ;; \
-        arm64) OPENSSL_ARCH_OPT=""; CC_ARCH_OPT="-march=armv8-a" ;; \
-        *) OPENSSL_ARCH_OPT=""; CC_ARCH_OPT="" ;; \
+        amd64) OPENSSL_ARCH_OPT="enable-ec_nistp_64_gcc_128"; CC_ARCH_OPT="-march=x86-64"; CONTROL_FLOW_OPT="-fcf-protection=full"; LD_ARCH_OPT="-Wl,-z,shstk" ;; \
+        arm64) OPENSSL_ARCH_OPT=""; CC_ARCH_OPT="-march=armv8-a"; CONTROL_FLOW_OPT=""; LD_ARCH_OPT="" ;; \
+        *) OPENSSL_ARCH_OPT=""; CC_ARCH_OPT=""; CONTROL_FLOW_OPT=""; LD_ARCH_OPT="" ;; \
     esac \
     && ./auto/configure \
         --with-debug \
@@ -133,22 +137,30 @@ RUN --mount=type=cache,target=/root/.cache/ccache,sharing=locked \
         --with-cc="$CC" \
         # Compilation flags
         --with-cc-opt="\
-            -static \
-            -static-libgcc \
+            -fPIE \
             -O2 \
             ${CC_ARCH_OPT} \
             -flto \
-            -fhardened \
-            -Wformat \
-            -Wformat-security \
+            -Wall \
+            -Wextra \
+            -Wformat=2 \
+            -Wimplicit-fallthrough \
             -Werror=format-security \
-            -fcode-hoisting \
+            -Werror=return-type \
+            -Wno-unused-parameter \
+            -Wno-implicit-fallthrough \
+            -Wno-sign-compare \
             -Wno-deprecated-declarations \
+            -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3 -D_GLIBCXX_ASSERTIONS \
+            -fstrict-flex-arrays=3 -fstack-clash-protection -fstack-protector-strong \
+            ${CONTROL_FLOW_OPT} -ftrivial-auto-var-init=pattern \
+            -fno-delete-null-pointer-checks -fno-strict-overflow \
+            -fasynchronous-unwind-tables -fomit-frame-pointer \
             -DTCP_FASTOPEN=23" \
-        --with-ld-opt="\
-            -L/usr/local/lib \
-            -lz \
-            -static" \
+        --with-ld-opt="-fuse-ld=lld -L/usr/local/lib -lz -static-pie \
+            -Wl,-z,nodlopen -Wl,-z,noexecstack -Wl,-z,relro -Wl,-z,now \
+            -Wl,-z,separate-code ${LD_ARCH_OPT} \
+            -Wl,--as-needed -Wl,--no-copy-dt-needed-entries" \
         # Core features
         --with-compat \
         --with-pcre-jit \
@@ -198,8 +210,12 @@ RUN --mount=type=cache,target=/root/.cache/ccache,sharing=locked \
     # Build and install NGINX
     && make -s -j "$(nproc)" && make -s install && make -s clean \
     # Security hardening: strip debug symbols and compress binary
-    && strip --strip-all /usr/sbin/nginx \
-    && upx -q --best --lzma /usr/sbin/nginx \
+    && llvm-strip --strip-all /usr/sbin/nginx \
+    && upx -qq --best --lzma /usr/sbin/nginx \
+    && ldd /usr/sbin/nginx || true \
+    && file /usr/sbin/nginx | grep 'statically linked' \
+    && readelf -dn /usr/sbin/nginx | grep -E 'Properties|no dynamic' \
+    && ls -lash /usr/sbin/nginx \
     # Set proper permissions
     && chown -R "10001:10001" /etc/nginx && rm -rf /tmp/* \
     && grep -E "(root|nginx)" /etc/passwd > /tmp/passwd \
@@ -237,20 +253,20 @@ EXPOSE 8080/tcp 8443/tcp 8443/udp
 
 # OCI labels for image metadata
 LABEL description="Distroless NGINX with HTTP/3, QUIC, ECH and PQC support🚀" \
-      maintainer="ammnt <admin@msftcnsi.com>" \
+      maintainer="ammnt" \
       org.opencontainers.image.description="Distroless NGINX with HTTP/3, QUIC, ECH and PQC support🚀" \
-      org.opencontainers.image.authors="ammnt, admin@msftcnsi.com" \
+      org.opencontainers.image.authors="ammnt" \
       org.opencontainers.image.title="Distroless NGINX with HTTP/3, QUIC, ECH and PQC support🚀" \
       org.opencontainers.image.source="https://github.com/ammnt/nginx/" \
       org.opencontainers.image.created=${BUILD_DATE} \
       org.opencontainers.image.documentation="https://github.com/ammnt/nginx/blob/main/README.md" \
       org.opencontainers.image.licenses="BSD-2-Clause License" \
-      org.opencontainers.image.url="https://msftcnsi.com" \
+      org.opencontainers.image.url="https://ammnt.fun" \
       org.opencontainers.image.version=${APP_VERSION} \
       org.opencontainers.image.revision=${VCS_REF}
 
 # Health check for container orchestration
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=2 \
+HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
   CMD ["/usr/sbin/nginx", "-qt"]
 
 # Use SIGQUIT for graceful shutdown with connection draining

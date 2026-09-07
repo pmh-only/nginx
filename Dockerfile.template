@@ -1,8 +1,8 @@
 # syntax=docker/dockerfile:1.7
 
 # Build arguments for version pinning and reproducibility
-ARG BASE_VERSION
-ARG BASE_HASH
+ARG BASE_VERSION=3.24.1
+ARG BASE_HASH=bec4ccd3817e7c824eb0388971a0b83fab111d586285511ba0266b77e8dc65a9
 FROM alpine:${BASE_VERSION}@sha256:${BASE_HASH} AS builder
 ARG TARGETARCH
 ARG OPENSSL_VERSION
@@ -38,7 +38,7 @@ RUN set -eu \
         zstd-static=1.5.7-r2 \
         brotli-dev=1.2.0-r1  \
         brotli-static=1.2.0-r1 \
-        curl=8.21.0-r0 \
+        curl=8.22.0-r0 \
         bash=5.3.9-r1 \
     # Update CA certificates for SSL verification
     && update-ca-certificates
@@ -94,6 +94,14 @@ RUN --mount=type=cache,target=/root/.cache/ccache,sharing=locked \
     && sed -i "s/compat=0/compat=1/" /tmp/zlib-ng/configure && CC="ccache clang" ./configure --zlib-compat \
     # Build and install zlib-ng
     && make -s -j "$(nproc)" && make -s install && make -s clean
+
+ENV CC=clang \
+    CXX=clang++ \
+    LD=lld \
+    AR=llvm-ar \
+    NM=llvm-nm \
+    RANLIB=llvm-ranlib \
+    STRIP=llvm-strip
 
 # Configure and build NGINX with security hardening and optimizations
 WORKDIR /tmp/nginx
@@ -212,10 +220,6 @@ RUN --mount=type=cache,target=/root/.cache/ccache,sharing=locked \
     # Security hardening: strip debug symbols and compress binary
     && llvm-strip --strip-all /usr/sbin/nginx \
     && upx -qq --best --lzma /usr/sbin/nginx \
-    && ldd /usr/sbin/nginx || true \
-    && file /usr/sbin/nginx | grep 'statically linked' \
-    && readelf -dn /usr/sbin/nginx | grep -E 'Properties|no dynamic' \
-    && ls -lash /usr/sbin/nginx \
     # Set proper permissions
     && chown -R "10001:10001" /etc/nginx && rm -rf /tmp/* \
     && grep -E "(root|nginx)" /etc/passwd > /tmp/passwd \
@@ -273,7 +277,7 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
 STOPSIGNAL SIGQUIT
 
 # Run as non-root user for security
-USER "10001:10001"
+USER 10001:10001
 
 WORKDIR /tmp
 

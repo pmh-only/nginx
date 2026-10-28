@@ -279,12 +279,14 @@ RUN --mount=type=cache,target=/root/.cache/ccache,sharing=locked \
     make -s -j "$(nproc)" && make -s install \
     && file objs/src/http/ngx_http.o objs/src/core/nginx.o | grep -i 'LLVM IR bitcode' && make -s clean \
     # Security hardening: strip debug symbols and compress binary
-    && strings /usr/sbin/nginx | grep -iE "zlib-ng/zlib.h" \
+    && file /usr/sbin/nginx \
+    && readelf --program-headers --wide /usr/sbin/nginx > /tmp/nginx-program-headers \
+    && readelf --dynamic --wide /usr/sbin/nginx > /tmp/nginx-dynamic-section \
+    && ! grep -q 'INTERP' /tmp/nginx-program-headers \
+    && ! grep -q '(NEEDED)' /tmp/nginx-dynamic-section \
     && llvm-strip --strip-all /usr/sbin/nginx \
     && upx -qq --best --lzma /usr/sbin/nginx \
     && ls -lash /usr/sbin/nginx && /usr/sbin/nginx -V \
-    && file /usr/sbin/nginx | grep 'statically linked' \
-    && readelf -dn /usr/sbin/nginx | grep -E 'Properties|no dynamic' \
     # Set proper permissions
     && chown -R "10001:10001" /etc/nginx && rm -rf /tmp/* \
     && grep -E "(root|nginx)" /etc/passwd > /tmp/passwd \

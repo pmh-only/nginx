@@ -1,8 +1,8 @@
 # syntax=docker/dockerfile:1.7
 
 # Build arguments for version pinning and reproducibility
-ARG BASE_VERSION=3.24.1
-ARG BASE_HASH=bec4ccd3817e7c824eb0388971a0b83fab111d586285511ba0266b77e8dc65a9
+ARG BASE_VERSION=3.24.3
+ARG BASE_HASH=be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
 FROM alpine:${BASE_VERSION}@sha256:${BASE_HASH} AS builder
 ARG TARGETARCH
 ARG OPENSSL_VERSION
@@ -12,15 +12,22 @@ ENV CCACHE_DIR=/root/.cache/ccache \
     CCACHE_BASEDIR=/tmp \
     CCACHE_COMPILERCHECK=content \
     CCACHE_MAXSIZE=2G
+SHELL ["/bin/ash", "-euo", "pipefail", "-c"]
+ENV CC=clang \
+    CXX=clang++ \
+    LD=lld \
+    AR=llvm-ar \
+    NM=llvm-nm \
+    RANLIB=llvm-ranlib \
+    STRIP=llvm-strip
 
 WORKDIR /tmp
 # System setup and dependency installation
-RUN set -eu \
-    # Create non-root user for security (nginx:nginx)
-    && addgroup --system --gid "10001" nginx && adduser --disabled-password --shell /bin/false --ingroup nginx --uid "10001" --no-create-home nginx \
-    # Update system and install build dependencies
-    && apk -U -q upgrade && apk add -q --no-cache \
+RUN addgroup --system --gid "10001" nginx && adduser --disabled-password --shell /bin/false --ingroup nginx --uid "10001" --no-create-home nginx \
+    # Install build dependencies
+    && apk add -q --no-cache \
         clang22=22.1.3-r2 \
+        clang22-dev=22.1.3-r2 \
         lld22=22.1.3-r0 \
         llvm=22-r0 \
         make=4.4.1-r4 \
@@ -30,29 +37,31 @@ RUN set -eu \
         ca-certificates=20260611-r0 \
         ccache=4.13.6-r0 \
         linux-headers=7.0.0-r1 \
-        tzdata=2026c-r0 \
         upx=5.2.0-r0 \
-        perl=5.42.2-r0 \
+        perl=5.42.2-r1 \
         cmake=4.2.3-r0 \
         zstd-dev=1.5.7-r2 \
         zstd-static=1.5.7-r2 \
-        brotli-dev=1.2.0-r1  \
-        brotli-static=1.2.0-r1 \
-        curl=8.22.0-r0 \
-        bash=5.3.9-r1 \
-    # Update CA certificates for SSL verification
-    && update-ca-certificates
-
-SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
-RUN git config --global advice.detachedHead false \
-    && PCRE_VERSION=$(curl -sSfL "https://api.github.com/repos/PCRE2Project/pcre2/releases/latest" | grep '"tag_name":' | sed -E 's/.*"pcre2\-([^"]+)".*/\1/') \
-    && ZLIB_VERSION=$(curl -sSfL "https://api.github.com/repos/zlib-ng/zlib-ng/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/') \
+        brotli-dev=1.2.1-r0 \
+        brotli-static=1.2.1-r0 \
+        autoconf=2.73-r0 \
+        automake=1.18.1-r1 \
+        libtool=2.6.0-r1 \
+        python3-dev=3.14.10-r1 \
+        cargo=1.96.1-r0 \
+        rust=1.96.1-r0 \
+        pkgconf=2.5.1-r0 \
+    && update-ca-certificates \
+    && git config --global advice.detachedHead false \
+    && PCRE_VERSION=$(git ls-remote --tags --refs https://github.com/PCRE2Project/pcre2 'pcre2-*' | grep -v -- '-RC' | sed 's|.*/||' | tail -1) \
+    && ZLIB_VERSION=$(git ls-remote --tags --refs https://github.com/zlib-ng/zlib-ng | sed 's|.*/||' | sed 's/^v//' | sort -V | tail -1) \
+    && ACME_VERSION=$(git ls-remote --tags --refs https://github.com/nginx/nginx-acme 'v*' | sed 's|.*/||' | sort -V | tail -1) \
     # Clone NGINX webserver and remove documentation
     && git clone -q --depth 1 --recursive -j8 --single-branch -b "release-${APP_VERSION}" https://github.com/nginx/nginx && rm -rf /tmp/nginx/docs/html/* \
     # Clone OpenSSL with HTTP/3 and QUIC support
     && git clone -q --depth 1 --recursive -j8 --single-branch -b "openssl-${OPENSSL_VERSION}" https://github.com/openssl/openssl \
     # Clone PCRE2 for regex with JIT support
-    && git clone -q --depth 1 --recursive -j8 --single-branch -b "pcre2-${PCRE_VERSION}" https://github.com/PCRE2Project/pcre2 \
+    && git clone -q --depth 1 --recursive -j8 --single-branch -b "${PCRE_VERSION}" https://github.com/PCRE2Project/pcre2 \
     # Clone zlib-ng for modern compression performance
     && git clone -q --depth 1 --recursive -j8 --single-branch -b "${ZLIB_VERSION}" https://github.com/zlib-ng/zlib-ng \
     # Clone Brotli compression module
@@ -62,6 +71,8 @@ RUN git config --global advice.detachedHead false \
     # Clone ZSTD compression module (use HEAD: v0.1.1 has a bug where block size is set
     # before sub_filter body phase runs, producing corrupted output when sub_filter is active)
     && git clone -q --depth 1 --recursive -j8 https://github.com/tokers/zstd-nginx-module \
+    # Clone ACME module
+    && git clone -q --depth 1 --recursive -j8 --single-branch -b "${ACME_VERSION}" https://github.com/nginx/nginx-acme \
     # Remove Server header from HTTP responses (HTTP/1.1, HTTP/2, HTTP/3)
     && sed -ie 's@r->headers_out.server == NULL@0@g' \
         /tmp/nginx/src/http/ngx_http_header_filter_module.c \
@@ -95,13 +106,47 @@ RUN --mount=type=cache,target=/root/.cache/ccache,sharing=locked \
     # Build and install zlib-ng
     && make -s -j "$(nproc)" && make -s install && make -s clean
 
-ENV CC=clang \
-    CXX=clang++ \
-    LD=lld \
-    AR=llvm-ar \
-    NM=llvm-nm \
-    RANLIB=llvm-ranlib \
-    STRIP=llvm-strip
+# Build PCRE2 as static library
+WORKDIR /tmp/pcre2
+RUN --mount=type=cache,target=/root/.cache/ccache,sharing=locked \
+    case "${TARGETARCH}" in \
+        amd64) ARCH_FLAGS="-march=x86-64 -fcf-protection=full" ;; \
+        arm64) ARCH_FLAGS="-march=armv8-a" ;; \
+        *) ARCH_FLAGS="" ;; \
+    esac \
+    && ./autogen.sh \
+    && CC="ccache clang" CFLAGS="-fPIC -O3 ${ARCH_FLAGS} -fstack-protector-strong \
+    -fvisibility=hidden -flto=full" \
+       ./configure \
+        --disable-shared \
+        --enable-static \
+        --enable-pcre2-8 \
+        --enable-unicode \
+        --enable-jit \
+    && make -s -j "$(nproc)" && make -s install && make -s clean
+
+# Build OpenSSL as static library
+WORKDIR /tmp/openssl
+RUN --mount=type=cache,target=/root/.cache/ccache,sharing=locked \
+    case "${TARGETARCH}" in \
+        amd64) OPENSSL_TARGET="linux-x86_64"; OPENSSL_ARCH_OPT="enable-ec_nistp_64_gcc_128" ;; \
+        arm64) OPENSSL_TARGET="linux-aarch64"; OPENSSL_ARCH_OPT="" ;; \
+        *) OPENSSL_TARGET="linux-generic64"; OPENSSL_ARCH_OPT="" ;; \
+    esac \
+    && CC="ccache clang" ./Configure \
+        "${OPENSSL_TARGET}" \
+        ${OPENSSL_ARCH_OPT} \
+        no-tls1 \
+        no-tls1_1 \
+        no-shared \
+        no-weak-ssl-ciphers \
+        enable-quic \
+        enable-ktls \
+        zlib \
+        --prefix=/tmp/openssl/.openssl \
+        --libdir=lib \
+        --openssldir=/tmp/openssl/.openssl \
+    && make -s -j "$(nproc)" && make -s install_sw && make -s clean
 
 # Configure and build NGINX with security hardening and optimizations
 WORKDIR /tmp/nginx
@@ -146,9 +191,9 @@ RUN --mount=type=cache,target=/root/.cache/ccache,sharing=locked \
         # Compilation flags
         --with-cc-opt="\
             -fPIE \
-            -O2 \
+            -O3 \
             ${CC_ARCH_OPT} \
-            -flto \
+            -flto=full \
             -Wall \
             -Wextra \
             -Wformat=2 \
@@ -165,7 +210,7 @@ RUN --mount=type=cache,target=/root/.cache/ccache,sharing=locked \
             -fno-delete-null-pointer-checks -fno-strict-overflow \
             -fasynchronous-unwind-tables -fomit-frame-pointer \
             -DTCP_FASTOPEN=23" \
-        --with-ld-opt="-fuse-ld=lld -L/usr/local/lib -lz -static-pie \
+        --with-ld-opt="-fuse-ld=lld -flto=full -L/usr/local/lib -lz -static-pie \
             -Wl,-z,nodlopen -Wl,-z,noexecstack -Wl,-z,relro -Wl,-z,now \
             -Wl,-z,separate-code ${LD_ARCH_OPT} \
             -Wl,--as-needed -Wl,--no-copy-dt-needed-entries" \
@@ -208,18 +253,38 @@ RUN --mount=type=cache,target=/root/.cache/ccache,sharing=locked \
         --add-module="/tmp/ngx_brotli" \
         --add-module="/tmp/headers-more-nginx-module" \
         --add-module="/tmp/zstd-nginx-module" \
+        --add-module="/tmp/nginx-acme" \
     # Swap zstd before brotli in filter chain so zstd takes priority when client supports both.
     # Both modules insert themselves after gzip via the same sed pattern; brotli runs first
     # (so zstd lands between gzip and brotli). Swapping here puts zstd after brotli → LIFO
     # means zstd runs first and wins when Accept-Encoding contains both br and zstd.
     && perl -0777 -i -pe \
         's/&ngx_http_zstd_filter_module,(\n\s+)&ngx_http_brotli_filter_module,/&ngx_http_brotli_filter_module,$1&ngx_http_zstd_filter_module,/g' \
-        objs/ngx_modules.c \
-    # Build and install NGINX
-    && make -s -j "$(nproc)" && make -s install && make -s clean \
+        objs/ngx_modules.c
+
+# Global ENVs for OpenSSL
+ENV OPENSSL_DIR="/tmp/openssl/.openssl" \
+    OPENSSL_INCLUDE_DIR="/tmp/openssl/.openssl/include" \
+    OPENSSL_LIB_DIR="/tmp/openssl/.openssl/lib" \
+    PKG_CONFIG_PATH="/tmp/openssl/.openssl/lib/pkgconfig"
+
+# Build ACME module for NGINX
+WORKDIR /tmp/nginx-acme
+RUN NGINX_BUILD_DIR="$(realpath ../nginx/objs)" \
+    && export NGINX_BUILD_DIR && cargo build --release
+
+# Build and install NGINX
+WORKDIR /tmp/nginx
+RUN --mount=type=cache,target=/root/.cache/ccache,sharing=locked \
+    make -s -j "$(nproc)" && make -s install \
+    && file objs/src/http/ngx_http.o objs/src/core/nginx.o | grep -i 'LLVM IR bitcode' && make -s clean \
     # Security hardening: strip debug symbols and compress binary
+    && strings /usr/sbin/nginx | grep -iE "zlib-ng/zlib.h" \
     && llvm-strip --strip-all /usr/sbin/nginx \
     && upx -qq --best --lzma /usr/sbin/nginx \
+    && ls -lash /usr/sbin/nginx && /usr/sbin/nginx -V \
+    && file /usr/sbin/nginx | grep 'statically linked' \
+    && readelf -dn /usr/sbin/nginx | grep -E 'Properties|no dynamic' \
     # Set proper permissions
     && chown -R "10001:10001" /etc/nginx && rm -rf /tmp/* \
     && grep -E "(root|nginx)" /etc/passwd > /tmp/passwd \
